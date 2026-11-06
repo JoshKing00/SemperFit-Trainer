@@ -1,5 +1,9 @@
 import streamlit as st
 import google.generativeai as genai
+import requests
+import json
+import time
+import re
 
 # --- PAGE SETUP ---
 st.set_page_config(
@@ -8,14 +12,37 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- INITIALIZE SESSION STATE ---
+if "plan_text" not in st.session_state:
+    st.session_state["plan_text"] = ""
+if "used_engine" not in st.session_state:
+    st.session_state["used_engine"] = ""
+
 # --- THEME & HEADER SECTION ---
 st.title("⚓ SemperFit: USCG Tactical Readiness Trainer")
 st.caption("Semper Paratus Conditioning | Physical Fitness Test (PFT) & Underway Readiness for U.S. Coast Guard Personnel")
 
-# --- SIDEBAR: SECURE API KEY INPUT & REFERENCE ---
+# --- SIDEBAR: SECURE AUTHENTICATION ---
 with st.sidebar:
-    st.header("🔑 SemperFit Control Panel")
-    api_key = st.text_input("Enter Gemini API Key", type="password", help="Get a free key from Google AI Studio")
+    st.header("🔑 Authentication & Engine")
+    
+    # Check for secrets first, else prompt user
+    default_key = st.secrets.get("GEMINI_API_KEY", "")
+    api_key = st.text_input("Enter API Key", value=default_key, type="password", help="Enter Google AI Studio key (AIza...) or DoD GenAI key (STARK...)")
+    
+    dod_endpoint = ""
+    is_stark_key = api_key.strip().startswith("STARK")
+    
+    if is_stark_key:
+        st.success("🎖️ Detected: DoD GenAI / STARK Enterprise Token")
+        dod_endpoint = st.text_input(
+            "DoD Gateway Base URL",
+            value=st.secrets.get("DOD_GATEWAY_URL", "https://api.genai.mil/v1"),
+            help="The endpoint base URL provided in your GenAI.mil developer documentation."
+        )
+    else:
+        st.info("🌐 Using Public Google Generative AI Engine")
+        
     st.markdown("---")
     st.markdown("### 📋 Quick Reference: USCG PFT")
     st.write("• **1-Min Push-ups:** Chest to deck, full lockout")
@@ -34,7 +61,7 @@ with col1:
     program_mode = st.radio("Program Type", ["Multi-Week Training Plan", "Single Workout"])
     if program_mode == "Multi-Week Training Plan":
         weeks = st.selectbox("Program Duration", ["4 Weeks (Express Prep)", "8 Weeks (Standard Macrocycle)", "12 Weeks (Full Overhaul)"])
-        frequency = st.select_slider("Weekly Frequency (Days/Week)", options=[2, 3, 4, 5, 6], value=4)
+        frequency = st.select_slider("Weekly Frequency (Days/Week)", options=, value=4)
     else:
         weeks = "Single Day"
         frequency = 1
@@ -64,95 +91,121 @@ with col3:
         default=["Bodyweight Only"]
     )
 
-# --- RESILIENT MODEL CALL FUNCTION ---
-def generate_tactical_plan(api_key, prompt):
+# --- AI ROUTING ENGINES ---
+
+def call_google_commercial(api_key, prompt, output_placeholder):
+    """Handles standard Google AI Studio keys (AIza...)."""
     genai.configure(api_key=api_key)
-
-    # 1. Dynamically query models supporting generateContent for this API key
-    discovered_models = []
-    try:
-        for m in genai.list_models():
-            if "generateContent" in m.supported_generation_methods:
-                clean_name = m.name.replace("models/", "")
-                discovered_models.append(clean_name)
-    except Exception:
-        pass
-
-    # 2. Priority order prioritizing active endpoints recommended by Google
-    priority_order = [
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro-latest",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-2.5-flash",
-        "gemini-3.8-flash"
-    ]
-
-    # Combine prioritized active models with discovered endpoints
-    model_queue = [m for m in priority_order if m in discovered_models]
-    if not model_queue:
-        # Fall back to priority list first, then any other models discovered
-        model_queue = [m for m in priority_order if m not in discovered_models] + discovered_models
-
+    candidate_models = ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+    
     last_error = None
-    for model_name in model_queue:
+    for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            if response and response.text:
-                return response.text, model_name
+            response = model.generate_content(prompt, stream=True)
+            full_text = ""
+            for chunk in response:
+                if chunk and chunk.text:
+                    full_text += chunk.text
+                    output_placeholder.markdown(full_text + " ▌")
+            output_placeholder.markdown(full_text)
+            return full_text, f"Google Cloud ({model_name})"
         except Exception as err:
+            err_str = str(err)
             last_error = err
+            if "429" in err_str or "Quota exceeded" in err_str:
+                match = re.search(r'retry in ([\d\.]+)s', err_str)
+                delay = match.group(1) if match else "45"
+                raise Exception(
+                    f"RATE_LIMIT: Public Free Tier request limit reached. Please wait {delay}s before retrying."
+                )
             continue
+    raise Exception(f"All Google models failed. Last error: {last_error}")
 
-    raise Exception(f"All model endpoints failed. Last error: {last_error}")
+def call_stark_dod_gateway(api_key, base_url, prompt, output_placeholder):
+    """Handles DoD GenAI STARK Enterprise Gateway REST calls."""
+    clean_url = base_url.rstrip("/")
+    # Standard OpenAI/GenAI-compatible chat completion endpoint
+    target_url = f"{clean_url}/chat/completions"
+    
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "gemini-1.5-pro", # Default enterprise model mapping
+        "messages": [
+            {"role": "system", "content": "You are SemperFit AI, an elite military tactical strength specialist."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.4
+    }
+    
+    try:
+        response = requests.post(target_url, headers=headers, json=payload, timeout=60)
+        if response.status_code == 200:
+            result = response.json()
+            full_text = result["choices"][0]["message"]["content"]
+            output_placeholder.markdown(full_text)
+            return full_text, "DoD STARK GenAI Gateway"
+        else:
+            raise Exception(f"DoD Gateway Error (HTTP {response.status_code}): {response.text}")
+    except requests.exceptions.ConnectionError:
+        raise Exception(
+            "CONNECTION_ERROR: Could not reach the DoD STARK endpoint from public Streamlit Cloud. "
+            "If your STARK endpoint is restricted to NIPRNet/GovCloud, the app must run within the DoD network enclave."
+        )
 
 # --- GENERATION TRIGGER ---
 if st.button("🚀 Generate SemperFit Program", type="primary"):
     if not api_key:
-        st.error("Please enter your free Gemini API key in the left sidebar to proceed.")
+        st.error("Please enter your API key in the left sidebar to proceed.")
     else:
-        with st.spinner("SemperFit AI Coach is structuring your periodized program..."):
+        system_prompt = f"""
+        You are SemperFit AI, an elite military tactical strength and conditioning specialist (CSCS/TSAC-F) for the United States Coast Guard (USCG).
+
+        ATHLETE PROFILE:
+        - Gender: {gender} | Age: {age_bracket} | Location: {duty_location}
+        - Scope: {weeks} at {frequency} days/week | Time per session: {duration}
+        - Focus Weakness: {primary_weakness}
+        - Available Equipment: {', '.join(equipment)}
+
+        CONCISE OUTPUT DIRECTIVES:
+        1. Deliver an actionable, periodized program without conversational filler.
+        2. If Underway / Cutter Space: Restrict movements strictly to stable groundings, kettlebells/dumbbells, bodyweight density, and zero ballistic box jumps.
+        3. Structure the response into 3 concise sections:
+           - SECTION 1: Periodization Roadmap (Table showing Phase Name, Weekly Volume, RPE, and Milestone Targets).
+           - SECTION 2: Weekly Microcycle Blueprint (Provide the detailed breakdown for each of the {frequency} weekly training days: Warmup, Main Strength/Density Block, PFT Conditioning Finisher, and Cooldown).
+           - SECTION 3: Progressive Overload & USCG Testing Protocol (Clear progression rules week-to-week and final PFT test week preparation).
+        """
+
+        output_box = st.empty()
+        with st.spinner("⚡ SemperFit AI is assembling your tactical program..."):
             try:
-                system_prompt = f"""
-                You are SemperFit AI, an elite military tactical strength and conditioning specialist (CSCS/TSAC-F) built specifically for the United States Coast Guard (USCG).
-
-                ATHLETE PROFILE:
-                - Gender: {gender}
-                - Age Bracket: {age_bracket}
-                - Operating Environment: {duty_location}
-                - Program Scope: {weeks} at {frequency} days/week
-                - Available Session Time: {duration}
-                - Primary Weakness: {primary_weakness}
-                - Available Equipment: {', '.join(equipment)}
-
-                OPERATIONAL TRAINING PRINCIPLES:
-                1. If duty location is Underway / Cutter Space: Strictly avoid high-box jumps, overhead snatches, or heavy barbell lifts subject to ship roll hazards. Emphasize floor-based stability, kettlebell loading, band work, EMOM sets, and isometric core endurance.
-                2. If Program Scope is Multi-Week: Outline a clear periodization structure:
-                   - Accumulation Phase (Volume & Movement Economy)
-                   - Intensification Phase (Work Capacity & Target PFT Pacing)
-                   - Peaking & Taper Phase (Max Output & Testing Protocol)
-                3. Structure daily sessions with:
-                   - Dynamic Prep & Mobility (5 mins)
-                   - Primary Strength / Density Block
-                   - PFT Conditioning / Tactical Capacity Block
-                   - Down-regulation & Decompression
-
-                Format the output strictly in professional, clean markdown with clear headers, tables, and bullet points.
-                """
-
-                plan_text, used_model = generate_tactical_plan(api_key, system_prompt)
-
-                st.success(f"✅ SemperFit Plan Ready! (Engine: {used_model})")
-                st.markdown("---")
-
-                # DISPLAY THE PLAN
-                st.markdown(plan_text)
-
-                # EXPORT / PRINT ADVICE
-                st.info("💡 **Semper Paratus Tip:** Use your browser's Print feature (Ctrl+P / Cmd+P) to save this schedule as an offline PDF or physical sheet before deploying underway.")
-
+                if is_stark_key:
+                    completed_plan, used_engine = call_stark_dod_gateway(
+                        api_key, dod_endpoint, system_prompt, output_box
+                    )
+                else:
+                    completed_plan, used_engine = call_google_commercial(
+                        api_key, system_prompt, output_box
+                    )
+                    
+                st.session_state["plan_text"] = completed_plan
+                st.session_state["used_engine"] = used_engine
+                st.success(f"✅ SemperFit Plan Ready! (Engine: {used_engine})")
             except Exception as e:
-                st.error(f"Error communicating with Gemini API: {e}")
+                err_msg = str(e)
+                if "RATE_LIMIT:" in err_msg:
+                    st.warning(f"⏳ **Rate Limit Notice:** {err_msg.replace('RATE_LIMIT:', '')}")
+                elif "CONNECTION_ERROR:" in err_msg:
+                    st.error(f"🔒 **Network Boundary Notice:** {err_msg.replace('CONNECTION_ERROR:', '')}")
+                else:
+                    st.error(f"Error communicating with AI engine: {e}")
+
+# --- PERSISTENT PLAN DISPLAY ---
+if st.session_state["plan_text"]:
+    st.markdown("---")
+    st.markdown(st.session_state["plan_text"])
+    st.info("💡 **Semper Paratus Tip:** Use your browser's Print feature (Ctrl+P / Cmd+P) to save this schedule as an offline PDF or physical sheet before deploying underway.")
