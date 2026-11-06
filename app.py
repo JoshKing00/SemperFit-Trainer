@@ -25,14 +25,14 @@ st.caption("Semper Paratus Conditioning | Physical Fitness Test (PFT) & Underway
 # --- SIDEBAR: SECURE AUTHENTICATION ---
 with st.sidebar:
     st.header("🔑 Authentication & Engine")
-    
+
     # Check for secrets first, else prompt user
     default_key = st.secrets.get("GEMINI_API_KEY", "")
     api_key = st.text_input("Enter API Key", value=default_key, type="password", help="Enter Google AI Studio key (AIza...) or DoD GenAI key (STARK...)")
-    
+
     dod_endpoint = ""
     is_stark_key = api_key.strip().startswith("STARK")
-    
+
     if is_stark_key:
         st.success("🎖️ Detected: DoD GenAI / STARK Enterprise Token")
         dod_endpoint = st.text_input(
@@ -42,7 +42,7 @@ with st.sidebar:
         )
     else:
         st.info("🌐 Using Public Google Generative AI Engine")
-        
+
     st.markdown("---")
     st.markdown("### 📋 Quick Reference: USCG PFT")
     st.write("• **1-Min Push-ups:** Chest to deck, full lockout")
@@ -61,7 +61,7 @@ with col1:
     program_mode = st.radio("Program Type", ["Multi-Week Training Plan", "Single Workout"])
     if program_mode == "Multi-Week Training Plan":
         weeks = st.selectbox("Program Duration", ["4 Weeks (Express Prep)", "8 Weeks (Standard Macrocycle)", "12 Weeks (Full Overhaul)"])
-        frequency = st.select_slider("Weekly Frequency (Days/Week)", options=, value=4)
+        frequency = st.select_slider("Weekly Frequency (Days/Week)", options=[2, 3, 4, 5, 6], value=4)
     else:
         weeks = "Single Day"
         frequency = 1
@@ -97,7 +97,7 @@ def call_google_commercial(api_key, prompt, output_placeholder):
     """Handles standard Google AI Studio keys (AIza...)."""
     genai.configure(api_key=api_key)
     candidate_models = ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
-    
+
     last_error = None
     for model_name in candidate_models:
         try:
@@ -125,23 +125,22 @@ def call_google_commercial(api_key, prompt, output_placeholder):
 def call_stark_dod_gateway(api_key, base_url, prompt, output_placeholder):
     """Handles DoD GenAI STARK Enterprise Gateway REST calls."""
     clean_url = base_url.rstrip("/")
-    # Standard OpenAI/GenAI-compatible chat completion endpoint
     target_url = f"{clean_url}/chat/completions"
-    
+
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
-        "model": "gemini-1.5-pro", # Default enterprise model mapping
+        "model": "gemini-1.5-pro",
         "messages": [
             {"role": "system", "content": "You are SemperFit AI, an elite military tactical strength specialist."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.4
     }
-    
+
     try:
         response = requests.post(target_url, headers=headers, json=payload, timeout=60)
         if response.status_code == 200:
@@ -191,7 +190,7 @@ if st.button("🚀 Generate SemperFit Program", type="primary"):
                     completed_plan, used_engine = call_google_commercial(
                         api_key, system_prompt, output_box
                     )
-                    
+
                 st.session_state["plan_text"] = completed_plan
                 st.session_state["used_engine"] = used_engine
                 st.success(f"✅ SemperFit Plan Ready! (Engine: {used_engine})")
