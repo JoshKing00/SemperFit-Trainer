@@ -68,38 +68,41 @@ with col3:
 def generate_tactical_plan(api_key, prompt):
     genai.configure(api_key=api_key)
 
-    # 1. Try to dynamically discover models supporting generateContent
-    candidates = []
+    # 1. Dynamically query models supporting generateContent for this API key
+    discovered_models = []
     try:
         for m in genai.list_models():
             if "generateContent" in m.supported_generation_methods:
                 clean_name = m.name.replace("models/", "")
-                candidates.append(clean_name)
+                discovered_models.append(clean_name)
     except Exception:
         pass
 
-    # 2. Prioritize modern flash models
-    preferred_order = [
+    # 2. Priority order prioritizing active endpoints recommended by Google
+    priority_order = [
         "gemini-2.0-flash",
-        "gemini-2.5-flash",
         "gemini-2.0-flash-lite",
         "gemini-1.5-flash-latest",
         "gemini-1.5-pro-latest",
+        "gemini-1.5-flash",
         "gemini-1.5-pro",
-        "gemini-1.0-pro"
+        "gemini-2.5-flash",
+        "gemini-3.8-flash"
     ]
 
-    # Merge dynamically discovered models with fallback priority list
-    model_queue = [m for m in preferred_order if m in candidates]
+    # Combine prioritized active models with discovered endpoints
+    model_queue = [m for m in priority_order if m in discovered_models]
     if not model_queue:
-        model_queue = preferred_order + candidates
+        # Fall back to priority list first, then any other models discovered
+        model_queue = [m for m in priority_order if m not in discovered_models] + discovered_models
 
     last_error = None
     for model_name in model_queue:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
-            return response.text, model_name
+            if response and response.text:
+                return response.text, model_name
         except Exception as err:
             last_error = err
             continue
