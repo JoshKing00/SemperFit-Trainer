@@ -34,7 +34,7 @@ with col1:
     program_mode = st.radio("Program Type", ["Multi-Week Training Plan", "Single Workout"])
     if program_mode == "Multi-Week Training Plan":
         weeks = st.selectbox("Program Duration", ["4 Weeks (Express Prep)", "8 Weeks (Standard Macrocycle)", "12 Weeks (Full Overhaul)"])
-        frequency = st.select_slider("Weekly Frequency", options=, value=4)
+        frequency = st.select_slider("Weekly Frequency (Days/Week)", options=[2, 3, 4, 5, 6], value=4)
     else:
         weeks = "Single Day"
         frequency = 1
@@ -88,7 +88,7 @@ def generate_tactical_plan(api_key, prompt):
         "gemini-1.5-pro",
         "gemini-1.0-pro"
     ]
-    
+
     # Merge dynamically discovered models with fallback priority list
     model_queue = [m for m in preferred_order if m in candidates]
     if not model_queue:
