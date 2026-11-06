@@ -34,7 +34,7 @@ with col1:
     program_mode = st.radio("Program Type", ["Multi-Week Training Plan", "Single Workout"])
     if program_mode == "Multi-Week Training Plan":
         weeks = st.selectbox("Program Duration", ["4 Weeks (Express Prep)", "8 Weeks (Standard Macrocycle)", "12 Weeks (Full Overhaul)"])
-        frequency = st.select_slider("Weekly Frequency", options=[3, 4, 5, 6], value=4)
+        frequency = st.select_slider("Weekly Frequency", options=, value=4)
     else:
         weeks = "Single Day"
         frequency = 1
@@ -64,17 +64,55 @@ with col3:
         default=["Bodyweight Only"]
     )
 
-# --- GENERATION LOGIC ---
+# --- RESILIENT MODEL CALL FUNCTION ---
+def generate_tactical_plan(api_key, prompt):
+    genai.configure(api_key=api_key)
+
+    # 1. Try to dynamically discover models supporting generateContent
+    candidates = []
+    try:
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                clean_name = m.name.replace("models/", "")
+                candidates.append(clean_name)
+    except Exception:
+        pass
+
+    # 2. Prioritize modern flash models
+    preferred_order = [
+        "gemini-2.0-flash",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro-latest",
+        "gemini-1.5-pro",
+        "gemini-1.0-pro"
+    ]
+    
+    # Merge dynamically discovered models with fallback priority list
+    model_queue = [m for m in preferred_order if m in candidates]
+    if not model_queue:
+        model_queue = preferred_order + candidates
+
+    last_error = None
+    for model_name in model_queue:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response.text, model_name
+        except Exception as err:
+            last_error = err
+            continue
+
+    raise Exception(f"All model endpoints failed. Last error: {last_error}")
+
+# --- GENERATION TRIGGER ---
 if st.button("🚀 Generate SemperFit Program", type="primary"):
     if not api_key:
         st.error("Please enter your free Gemini API key in the left sidebar to proceed.")
     else:
         with st.spinner("SemperFit AI Coach is structuring your periodized program..."):
             try:
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel("gemini-1.5-flash")
-
-                # SYSTEM PROMPT INSTRUCTIONS
                 system_prompt = f"""
                 You are SemperFit AI, an elite military tactical strength and conditioning specialist (CSCS/TSAC-F) built specifically for the United States Coast Guard (USCG).
 
@@ -102,13 +140,13 @@ if st.button("🚀 Generate SemperFit Program", type="primary"):
                 Format the output strictly in professional, clean markdown with clear headers, tables, and bullet points.
                 """
 
-                response = model.generate_content(system_prompt)
+                plan_text, used_model = generate_tactical_plan(api_key, system_prompt)
 
-                st.success("✅ SemperFit Plan Ready!")
+                st.success(f"✅ SemperFit Plan Ready! (Engine: {used_model})")
                 st.markdown("---")
 
                 # DISPLAY THE PLAN
-                st.markdown(response.text)
+                st.markdown(plan_text)
 
                 # EXPORT / PRINT ADVICE
                 st.info("💡 **Semper Paratus Tip:** Use your browser's Print feature (Ctrl+P / Cmd+P) to save this schedule as an offline PDF or physical sheet before deploying underway.")
